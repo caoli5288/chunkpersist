@@ -1,5 +1,7 @@
 package chunkpersist.v3;
 
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -9,14 +11,17 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 /**
  * This plugin to avoid too many chunk unload request lag the server.
  */
 public class $ extends JavaPlugin implements Listener {
 
-    private final Map<ChunkVec, Long> all = new HashMap<>();
-    private long chunkgcperiod;
+    private final Map<ChunkVec, ChunkVec.Expire> all = new HashMap<>();
+    private Cache<ChunkVec, ChunkVec.Expire> queued;
+
+    private int chunkgcperiod;
 
     private int chunkload;
     private int chunkunload;
@@ -24,7 +29,8 @@ public class $ extends JavaPlugin implements Listener {
 
     public void onEnable() {
         saveDefaultConfig();
-        chunkgcperiod = getConfig().getInt("chunk_gc_period", 300) * 1000L;
+        chunkgcperiod = getConfig().getInt("chunk_gc_period", 300) * 1000;
+        queued = CacheBuilder.newBuilder().expireAfterWrite(chunkgcperiod, TimeUnit.MILLISECONDS).build();
 
         getServer().getPluginManager().registerEvents(this, this);
         getServer().getScheduler().runTaskTimer(this, this::loginfo, 1200, 1200);
@@ -37,19 +43,20 @@ public class $ extends JavaPlugin implements Listener {
     @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
     public void onChunkLoad(ChunkLoadEvent event) {
         chunkload++;
-        all.put(new ChunkVec(event.getChunk()), System.currentTimeMillis());
+        ChunkVec vec = new ChunkVec(event.getChunk());
+        all.put(vec, queued.asMap().containsKey(vec) ? queued.asMap().remove(vec).calcNextGC() : ChunkVec.Expire.next(chunkgcperiod));
     }
 
     @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
     public void onChunkUnload(ChunkUnloadEvent event) {
         chunkunload++;
         ChunkVec vec = new ChunkVec(event.getChunk());
-        if (all.containsKey(vec) && all.get(vec) + chunkgcperiod > System.currentTimeMillis()) {
+        if (all.containsKey(vec) && all.get(vec).getNextGC() > System.currentTimeMillis()) {
             event.setCancelled(true);
             return;
         }
         actuallychunkunload++;
-        all.remove(vec);
+        queued.put(vec, all.remove(vec));
     }
 
 }
